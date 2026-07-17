@@ -14,3 +14,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["watcher", "watcher.adapters"]
+
+[tool.setuptools.package-data]
+watcher = ["triage-prompt.md"]

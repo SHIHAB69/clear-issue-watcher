@@ -110,11 +110,21 @@ Carries per-source env (e.g. `GH_CONFIG_DIR` for a scoped gh identity).
     (no server-side @-parse). userIds from `/dev/solutions` members or export assignees.
   - NOTE: comment uses ObjectId `taskId`; status/assign use numeric `taskNumber`.
     Export returns both.
+  - RESPONSE SHAPE (verified live): `/dev/*` endpoints wrap in `{results:[...]}`,
+    but the status (`PUT .../tasks/:num`) and assign (`POST .../tasks/:num/assign`)
+    endpoints return the **task object flat at the top level** — read those
+    directly, not under `results`.
 - Mentions-me detection: comment `mentions` are emails in export/feed → match owner email.
 - Anti-loop: bodies returned verbatim → signature-skip works unchanged.
 - Ops: no rate limits (be polite in poll interval); `/activity` paginates,
   `/export` does not (bound with filters); expired/revoked key → HTTP 401
-  `"Invalid, expired, or revoked API key"` → prompt to mint a new one.
+  `"Invalid, expired, or revoked API key"` → prompt to mint a new one. RBAC
+  errors: 403 `NOT_SOLUTION_MEMBER` / `INSUFFICIENT_PERMISSIONS`; 428 when a
+  solution context is required but missing.
+- STATUS: all endpoints above verified end-to-end on the `dev-jetrix` sandbox
+  (reads, writes, mentions, audit attribution, anti-loop signature) — PR #177.
+- SECRETS: the sandbox API key + Mongo URI are NOT stored here; the key goes in
+  the per-source gitignored config at setup time, never in the repo.
 - Open item: real production `app.jetrix.ai` data is NOT on this cluster; test
   against `dev-jetrix` sandbox now, real data once Selvam confirms the env + JWT_SECRET.
 

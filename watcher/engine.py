@@ -43,7 +43,11 @@ def drain_queue(source: config.Source, adapter, interactive: bool = False) -> No
         event = q[0]
         event["attempts"] = event.get("attempts", 0) + 1
         source.lock()                      # refresh during long runs
-        ok, _ = runtime.run_event(source, adapter, event, interactive=interactive)
+        try:
+            ok, _ = runtime.run_event(source, adapter, event, interactive=interactive)
+        except Exception as e:  # noqa: BLE001 — a bad event must not crash the cycle
+            config.log(f"[{source.slug}] run_event raised: {e}")
+            ok = False
         if ok:
             source.write_queue(q[1:])
             # count handled events; compact the rolling session periodically

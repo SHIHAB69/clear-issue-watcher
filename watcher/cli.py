@@ -88,25 +88,56 @@ def _add_jetrix() -> dict | None:
             "email": me.get("email"), "_key": key}
 
 
+def _cwd_repo() -> str | None:
+    """owner/name of the git repo in the current directory, or None."""
+    r = _sh(["git", "rev-parse", "--is-inside-work-tree"])
+    if r.returncode != 0:
+        return None
+    u = _sh(["git", "remote", "get-url", "origin"])
+    if u.returncode != 0:
+        return None
+    import re
+    m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", u.stdout.strip())
+    return m.group(1) if m else None
+
+
 def _bare(args):
-    """`watcher` with no subcommand: set up if empty, else open the live view."""
+    """`watcher` with no subcommand — context-aware:
+    - inside a registered project → open its live view
+    - inside a git repo not yet watched → offer to add THIS project
+    - otherwise → set up (if empty) or pick from the dashboard
+    """
+    from . import attach, scheduler
     srcs = config.load_config()["sources"]
+    cwd_repo = _cwd_repo()
+
+    # 1) in a git project? prefer the source that matches THIS repo
+    if cwd_repo:
+        match = next((s for s in srcs if s.get("platform") == "github"
+                      and s.get("repo") == cwd_repo), None)
+        if match:
+            return attach.attach(match["slug"])
+        # a git repo we don't watch yet → offer to add it
+        print(f"This project is `{cwd_repo}`, not watched yet.")
+        if input("Add it now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+            meta = _add_github()
+            if meta:
+                config.add_source(meta)
+                config.Source(meta["slug"]).set_mode("triage")
+                print(f"✓ Added '{meta['slug']}' (triage mode).")
+                if input("Open its live view now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+                    attach.attach(meta["slug"])
+        return
+
+    # 2) not in a project — set up if empty, else pick
     if not srcs:
         print("👋 No sources yet — let's set one up.\n")
         cmd_add(args)
         srcs = config.load_config()["sources"]
-        if srcs:
-            from . import scheduler
-            if input("\nRun watcher in the background from now on? [Y/n]: ").strip().lower() in ("", "y", "yes"):
-                print(scheduler.start())
-            if input(f"Open the live view now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
-                from . import attach
-                attach.attach(srcs[-1]["slug"])
+        if srcs and input("\nRun watcher in the background from now on? [Y/n]: ")\
+                .strip().lower() in ("", "y", "yes"):
+            print(scheduler.start())
         return
-    # sources exist → live dashboard
-    if len(srcs) == 1:
-        from . import attach
-        return attach.attach(srcs[0]["slug"])
     print("Your sources:")
     for i, s in enumerate(srcs, 1):
         src = config.Source(s["slug"])
@@ -116,7 +147,6 @@ def _bare(args):
     if pick.lower() == "a":
         return cmd_add(args)
     try:
-        from . import attach
         attach.attach(srcs[int(pick) - 1]["slug"])
     except (ValueError, IndexError):
         print("nothing selected.")

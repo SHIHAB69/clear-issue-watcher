@@ -149,7 +149,10 @@ class Source:
 
     # --- lock (per source) ---
     def locked(self, stale_s: int = 3600) -> bool:
-        return self._lock.exists() and time.time() - self._lock.stat().st_mtime < stale_s
+        try:
+            return time.time() - self._lock.stat().st_mtime < stale_s
+        except FileNotFoundError:      # another runner released it mid-check
+            return False
 
     def lock(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
