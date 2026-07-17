@@ -14,11 +14,9 @@ import json, os, subprocess, time
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO      = "nicorogers/clear.server"
-ME        = "SHIHAB69"
-SIGNATURE = "automated triage by Shihab's Claude Code"
-REPO_DIR  = Path("/Users/sihabhowlader/clear.server.fresh")
-PROMPT    = REPO_DIR / "scripts/issue-watcher/triage-prompt.md"
+import shutil
+
+TOOL_DIR  = Path(__file__).resolve().parent
 STATE_DIR = Path.home() / ".clear-issue-watcher"
 STATE     = STATE_DIR / "state.json"
 QUEUE     = STATE_DIR / "queue.jsonl"       # pending events, FIFO
@@ -27,15 +25,44 @@ LOCK      = STATE_DIR / "lock"
 LOG       = STATE_DIR / "watcher.log"
 SESSIONS  = STATE_DIR / "sessions.tsv"
 MODE_FILE = STATE_DIR / "mode"
-CLAUDE    = "/Users/sihabhowlader/.nvm/versions/node/v20.19.0/bin/claude"
+CONFIG    = STATE_DIR / "config.json"
+PROMPT    = TOOL_DIR / "triage-prompt.md"
+
+# --- config: what repo to watch, what local project to work in --------------
+# ~/.clear-issue-watcher/config.json  (created by the README's setup prompt):
+#   { "github_repo": "owner/name",
+#     "project_dir": "/abs/path/to/local/checkout",   # cwd for Claude = its CLAUDE.md
+#     "operator_login": "your-gh-login",   # optional; auto-detected via `gh api user`
+#     "claude_bin": "/abs/path/to/claude"  # optional; auto-detected via PATH
+#   }
+def _load_config():
+    if not CONFIG.exists():
+        raise SystemExit(f"missing {CONFIG} — run the README setup prompt first")
+    cfg = json.loads(CONFIG.read_text())
+    if not cfg.get("github_repo") or not cfg.get("project_dir"):
+        raise SystemExit(f"{CONFIG} needs 'github_repo' and 'project_dir'")
+    if not cfg.get("operator_login"):
+        r = subprocess.run(["gh", "api", "user", "-q", ".login"],
+                           capture_output=True, text=True)
+        cfg["operator_login"] = r.stdout.strip()
+    if not cfg.get("claude_bin"):
+        cfg["claude_bin"] = shutil.which("claude") or "claude"
+    return cfg
+
+_cfg      = _load_config()
+REPO      = _cfg["github_repo"]
+PROJECT_DIR = Path(_cfg["project_dir"])
+ME        = _cfg["operator_login"]
+CLAUDE    = _cfg["claude_bin"]
+SIGNATURE = "automated triage by Shihab's Claude Code"
 
 MODE = MODE_FILE.read_text().strip() if MODE_FILE.exists() else "triage"
 
 TOOLS_TRIAGE = [
     "Read", "Grep", "Glob",
     "Bash(gh issue view:*)", "Bash(gh issue comment:*)", "Bash(gh issue edit:*)",
-    "Bash(gh api repos/nicorogers/clear.server:*)", "Bash(gh auth token:*)",
-    "Bash(curl -sL -o /Users/sihabhowlader/.clear-issue-watcher/scratch/:*)",
+    f"Bash(gh api repos/{REPO}:*)", "Bash(gh auth token:*)",
+    f"Bash(curl -sL -o {STATE_DIR}/scratch/:*)",
     "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
 ]
 TOOLS_FULL = TOOLS_TRIAGE + [
@@ -179,7 +206,7 @@ def run_one(event):
     log(f"handle start: {event['type']} #{event['issue_number']} "
         f"(resume={resume_id[:8] or 'new'})")
     try:
-        res = subprocess.run(cmd, cwd=REPO_DIR, capture_output=True, text=True, timeout=3600)
+        res = subprocess.run(cmd, cwd=PROJECT_DIR, capture_output=True, text=True, timeout=3600)
     except subprocess.TimeoutExpired:
         log(f"handle TIMEOUT: #{event['issue_number']} — will retry next cycle")
         return False   # keep at head of queue

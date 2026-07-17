@@ -19,7 +19,11 @@ from pathlib import Path
 WATCH_LOG = Path.home() / ".clear-issue-watcher/watcher.log"
 MODE_FILE = Path.home() / ".clear-issue-watcher/mode"
 # claude stores session transcripts per-project; this is the repo's project dir
-PROJ_DIR  = Path.home() / ".claude/projects/-Users-sihabhowlader-clear-server-fresh"
+import json, re as _re
+_cfg = Path.home() / ".clear-issue-watcher/config.json"
+_pd  = json.loads(_cfg.read_text())["project_dir"] if _cfg.exists() else str(Path.cwd())
+# Claude Code names its per-project transcript dir by mangling the path: / and . -> -
+PROJ_DIR = Path.home() / ".claude/projects" / _re.sub(r"[/.]", "-", _pd)
 
 C_DIM, C_CYAN, C_GREEN, C_YELLOW, C_RESET = "\033[2m", "\033[36m", "\033[32m", "\033[33m", "\033[0m"
 

@@ -10,20 +10,64 @@ persistent Claude Code session that keeps full context across all tickets.
 
 ---
 
-## Install (once)
+## Setup with Claude Code (recommended — it configures itself)
+
+Prerequisites: `gh auth login` done, `claude` on your PATH, and a local
+checkout of the project whose issues you want watched. Then open Claude Code in
+this tool's folder and paste the prompt below, filling in the two blanks:
+
+> Set up this issue-watcher for me.
+> - GitHub repo to watch (issues source): **`<owner/name>`**  — e.g. `nicorogers/clear.server`
+> - Local path of that project on this machine: **`<abs/path>`**  — e.g. `/Users/me/clear.server.fresh`
+>
+> Do all of this:
+> 1. Verify prerequisites: `gh auth status`, `which claude`, and that the local
+>    path exists and is a git checkout of that repo (has a CLAUDE.md ideally).
+> 2. Write `~/.clear-issue-watcher/config.json` with `github_repo`,
+>    `project_dir`, and my `operator_login` (from `gh api user -q .login`).
+> 3. Create `~/.clear-issue-watcher/mode` containing `triage` (safe default).
+> 4. Install the launchd job: copy `com.clear.issue-watcher.plist.template` to
+>    `~/Library/LaunchAgents/com.clear.issue-watcher.plist`, replacing the
+>    ProgramArguments path with this folder's absolute `watch.py`, and set
+>    `StartInterval` to 120.
+> 5. Load it (`launchctl load …`), run one manual cycle (`python3 watch.py`) to
+>    confirm no config error, and show me `launchctl list | grep clear`.
+> 6. Tell me how to watch it (`monitor.py`) and how to switch to `full` mode.
+
+That's it — the agent reads the rest of this README for the details it needs.
+
+## Manual install (if you prefer)
 
 ```bash
-# 1. clone next to the server repo (paths in the scripts assume this layout)
-git clone git@github.com:SHIHAB69/clear-issue-watcher.git ~/tools/clear-issue-watcher
+# 1. clone the tool
+git clone https://github.com/SHIHAB69/clear-issue-watcher.git ~/tools/clear-issue-watcher
 
-# 2. install the launchd job (edit paths in the template first if yours differ)
+# 2. config: which repo to watch + where the local project lives
+mkdir -p ~/.clear-issue-watcher
+cat > ~/.clear-issue-watcher/config.json <<'JSON'
+{
+  "github_repo": "owner/name",
+  "project_dir": "/absolute/path/to/local/checkout",
+  "operator_login": "your-github-login"
+}
+JSON
+echo triage > ~/.clear-issue-watcher/mode
+
+# 3. launchd job — point ProgramArguments at THIS folder's watch.py
 cp ~/tools/clear-issue-watcher/com.clear.issue-watcher.plist.template \
    ~/Library/LaunchAgents/com.clear.issue-watcher.plist
-#   -> point ProgramArguments at watch.py's real location
+#   edit: ProgramArguments -> .../clear-issue-watcher/watch.py ; StartInterval -> 120
 
-# 3. prerequisites: `gh auth login` (SHIHAB69), `claude` on PATH, repo checkout
-#    at ~/clear.server.fresh with a working .env (SUPABASE_DB_URL etc.)
+# prerequisites: `gh auth login`, `claude` on PATH, the project checkout with
+# a working .env if the agent needs DB access in full mode.
 ```
+
+`config.json` keys: `github_repo` and `project_dir` are required;
+`operator_login` (auto-detected via `gh api user`) and `claude_bin`
+(auto-detected via PATH) are optional. The watcher runs Claude Code with its
+working directory set to `project_dir`, so the project's own `CLAUDE.md` and
+Claude memory are the authoritative context — the tool adds only behaviour
+rules (`triage-prompt.md`), never a second copy of the project's goals.
 
 ## Start / stop
 
