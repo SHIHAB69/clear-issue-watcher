@@ -135,6 +135,21 @@ class Source:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._mode.write_text(m)
 
+    # --- pause/resume (human interrupt of autonomous processing) ---
+    @property
+    def _paused(self) -> Path:
+        return self.dir / "paused"
+
+    def paused(self) -> bool:
+        return self._paused.exists()
+
+    def set_paused(self, on: bool) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        if on:
+            self._paused.write_text("1")
+        else:
+            self._paused.unlink(missing_ok=True)
+
     # --- rolling-session memory (compaction) ---
     @property
     def _memory(self) -> Path:

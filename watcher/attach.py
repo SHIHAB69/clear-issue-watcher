@@ -18,8 +18,9 @@ from .adapters import build_adapter
 C_DIM, C_YEL, C_RESET = "\033[2m", "\033[33m", "\033[0m"
 POLL_S = 60
 
-HELP = ("commands:  <text> = chat to the session   /mode full|triage   "
-        "/status   /poll (check now)   /help   /quit")
+HELP = ("commands:  <text> = quick chat   /chat = open full Claude TUI   "
+        "/stop /start = pause/resume autonomous   /mode full|triage   "
+        "/poll (check now)   /status   /help   /quit")
 
 
 def attach(slug: str):
@@ -35,8 +36,11 @@ def attach(slug: str):
     print(f"{C_YEL}╰{'─'*58}{C_RESET}")
     try:
         while True:
-            engine.run_source(slug, interactive=True)      # handle queued events (streamed)
-            line = runtime._timed_input(f"{C_DIM}watcher> (type, or wait {POLL_S}s to poll {ident}){C_RESET} ", POLL_S)
+            if not src.paused():
+                engine.run_source(slug, interactive=True)   # handle queued events (streamed)
+            pstate = " [PAUSED]" if src.paused() else ""
+            line = runtime._timed_input(
+                f"{C_DIM}watcher{pstate}> (type, or wait {POLL_S}s to poll {ident}){C_RESET} ", POLL_S)
             if line is None:                                # timeout → poll again
                 continue
             line = line.strip()
@@ -47,10 +51,29 @@ def attach(slug: str):
             if line == "/help":
                 print(HELP); continue
             if line == "/status":
-                print(f"  {slug} · {ident} · mode={src.mode()} · queued={len(src.queue())}")
+                print(f"  {slug} · {ident} · mode={src.mode()} · "
+                      f"queued={len(src.queue())} · {'PAUSED' if src.paused() else 'active'}")
                 continue
             if line == "/poll":
                 continue                                    # loop top re-runs discovery
+            if line in ("/stop", "/pause"):
+                src.set_paused(True); print("  ⏸ autonomous processing paused (/start to resume)")
+                continue
+            if line in ("/start", "/resume"):
+                src.set_paused(False); print("  ▶ resumed")
+                continue
+            if line == "/chat":
+                # hand off to the real Claude Code TUI on this session
+                import subprocess, shutil, os
+                sid = src.session_id()
+                cmd = [shutil.which("claude") or "claude"] + (["--resume", sid] if sid else [])
+                was = src.paused(); src.set_paused(True)
+                print("  ↪ opening full Claude TUI (autonomous paused)…")
+                subprocess.run(cmd, cwd=adapter.cwd(), env={**os.environ, **adapter.env()})
+                if not was:
+                    src.set_paused(False)
+                print("  ↩ back to watcher")
+                continue
             if line.startswith("/mode"):
                 parts = line.split()
                 if len(parts) == 2 and parts[1] in ("triage", "full"):
@@ -58,7 +81,7 @@ def attach(slug: str):
                 else:
                     print("  usage: /mode full|triage")
                 continue
-            # anything else → chat into the session, streamed
+            # anything else → quick chat into the session, streamed
             runtime.chat(src, adapter, line)
     except KeyboardInterrupt:
         print(f"\n{C_YEL}detached. Background runner keeps going if started (watcher status).{C_RESET}")

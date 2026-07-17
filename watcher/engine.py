@@ -74,6 +74,8 @@ def run_source(slug: str, interactive: bool = False) -> None:
     if not source.meta:
         config.log(f"[{slug}] no such source; skipping")
         return
+    if source.paused():                    # human hit /stop — hold autonomous work
+        return
     if source.locked():
         return
     source.lock()

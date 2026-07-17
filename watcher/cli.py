@@ -253,6 +253,43 @@ def cmd_attach(args):
     attach.attach(args.slug)
 
 
+def cmd_chat(args):
+    """Hand off to the REAL Claude Code TUI, resumed on this source's session —
+    full input panel, interject, arrow-key permissions, Esc to interrupt.
+    Pauses autonomous processing for the source while you're in it."""
+    from .adapters import build_adapter
+    src = config.Source(args.slug)
+    if not src.meta:
+        print(f"✗ No source '{args.slug}'. See: watcher list")
+        sys.exit(1)
+    adapter = build_adapter(src.meta)
+    claude = shutil.which("claude") or "claude"
+    sid = src.session_id()
+    cmd = [claude, "--resume", sid] if sid else [claude]
+    import os
+    env = {**os.environ, **adapter.env()}
+    print(f"↪ opening Claude Code on {args.slug}"
+          + (f" (resuming session {sid[:8]})" if sid else " (new session)")
+          + " — autonomous processing paused while you're in here.\n")
+    src.set_paused(True)
+    try:
+        subprocess.run(cmd, cwd=adapter.cwd(), env=env)   # inherits your terminal = full TUI
+    finally:
+        src.set_paused(False)
+        # the interactive session may have created/advanced a session id; keep the newest
+        print(f"\n↩ back to watcher. autonomous processing resumed for {args.slug}.")
+
+
+def cmd_pause(args):
+    config.Source(args.slug).set_paused(True)
+    print(f"⏸  {args.slug} paused (autonomous processing held). Resume: watcher resume {args.slug}")
+
+
+def cmd_resume(args):
+    config.Source(args.slug).set_paused(False)
+    print(f"▶  {args.slug} resumed.")
+
+
 def cmd_migrate_legacy(_args):
     """Import the legacy single-file watcher (~/.clear-issue-watcher) as a source."""
     import plistlib
@@ -314,8 +351,12 @@ def main(argv=None):
     st.add_argument("--interval", type=int, default=120, help="poll seconds (default 120)")
     sub.add_parser("stop", help="remove the background runner")
     sub.add_parser("status", help="scheduler + sources overview")
-    at = sub.add_parser("attach", help="drive a source interactively (with approval prompts)")
+    at = sub.add_parser("attach", help="live monitor a source (chat + approvals)")
     at.add_argument("slug")
+    ch = sub.add_parser("chat", help="open the REAL Claude Code TUI on a source's session")
+    ch.add_argument("slug")
+    pz = sub.add_parser("pause", help="hold autonomous processing for a source"); pz.add_argument("slug")
+    rs = sub.add_parser("resume", help="resume autonomous processing"); rs.add_argument("slug")
     sub.add_parser("migrate-legacy", help="import the old ~/.clear-issue-watcher as a source")
 
     args = p.parse_args(argv)
@@ -323,7 +364,8 @@ def main(argv=None):
         return _bare(args)
     {"add": cmd_add, "list": cmd_list, "remove": cmd_remove, "run-once": cmd_run_once,
      "mode": cmd_mode, "logs": cmd_logs, "doctor": cmd_doctor, "start": cmd_start,
-     "stop": cmd_stop, "status": cmd_status, "attach": cmd_attach,
+     "stop": cmd_stop, "status": cmd_status, "attach": cmd_attach, "chat": cmd_chat,
+     "pause": cmd_pause, "resume": cmd_resume,
      "migrate-legacy": cmd_migrate_legacy}[args.cmd](args)
 
 
