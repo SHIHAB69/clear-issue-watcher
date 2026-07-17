@@ -55,17 +55,26 @@ def _timed_input(prompt: str, timeout: int = 10, timeout_note: str = "") -> str 
 _C_DIM, _C_CYAN, _C_GREEN, _C_RESET = "\033[2m", "\033[36m", "\033[32m", "\033[0m"
 
 
-def _render_stream_event(obj) -> None:
-    """Pretty-print one stream-json event live (Claude-Code-like)."""
+def _out(line: str, emit) -> None:
+    if emit:
+        emit(line)
+    else:
+        print(line)
+
+
+def _render_stream_event(obj, emit=None) -> None:
+    """Render one stream-json event live. Prints, or sends to `emit(text)`."""
     t = obj.get("type")
     if t == "assistant":
         for c in (obj.get("message") or {}).get("content", []):
             if c.get("type") == "text" and c.get("text", "").strip():
-                print(f"{_C_GREEN}💬 {c['text'].strip()}{_C_RESET}")
+                _out(f"💬 {c['text'].strip()}" if emit
+                     else f"{_C_GREEN}💬 {c['text'].strip()}{_C_RESET}", emit)
             elif c.get("type") == "tool_use":
                 arg = c.get("input", {}).get("command") or c.get("input", {}).get("file_path") \
                     or c.get("input", {}).get("body") or ""
-                print(f"{_C_CYAN}🔧 {c.get('name','?')}{_C_RESET} {_C_DIM}{str(arg)[:150]}{_C_RESET}")
+                _out(f"🔧 {c.get('name','?')} {str(arg)[:150]}" if emit
+                     else f"{_C_CYAN}🔧 {c.get('name','?')}{_C_RESET} {_C_DIM}{str(arg)[:150]}{_C_RESET}", emit)
     elif t == "user":
         for c in (obj.get("message") or {}).get("content", []):
             if c.get("type") == "tool_result":
@@ -74,10 +83,10 @@ def _render_stream_event(obj) -> None:
                     body = " ".join(x.get("text", "") for x in body if isinstance(x, dict))
                 s = str(body or "").strip().replace("\n", " ")[:160]
                 if s:
-                    print(f"{_C_DIM}   ↳ {s}{_C_RESET}")
+                    _out(f"   ↳ {s}" if emit else f"{_C_DIM}   ↳ {s}{_C_RESET}", emit)
 
 
-def _stream_turn(cmd, cwd, env):
+def _stream_turn(cmd, cwd, env, emit=None):
     """Run a turn with live streaming output. Returns (ok, session_id, result_text)."""
     scmd = cmd + ["--output-format", "stream-json", "--verbose"]
     sid, result = "", ""
@@ -102,7 +111,7 @@ def _stream_turn(cmd, cwd, env):
             sid = obj.get("session_id", sid) or sid
             result = obj.get("result") or ""
         else:
-            _render_stream_event(obj)
+            _render_stream_event(obj, emit)
     proc.wait()
     if proc.returncode != 0:
         return False, sid, f"stream turn exited rc={proc.returncode}"
@@ -129,25 +138,27 @@ def _one_turn(cmd, cwd, env):
     return True, sid, result
 
 
-def chat(source: "config.Source", adapter, message: str) -> None:
-    """Send a free-form message into the source's live session and stream the
-    reply (the interactive 'chat line' between events)."""
+def chat(source: "config.Source", adapter, message: str, emit=None) -> None:
+    """Send an operator message into the source's live session and stream the
+    reply. Framed as an OPERATOR MESSAGE, not an issue comment — Claude treats
+    it as extra instruction/context, never posts it as a ticket comment."""
     import os
     resume_id = source.session_id()
     env = {**os.environ, **adapter.env()}
+    framed = ("[OPERATOR MESSAGE — this is the human operator talking to you "
+              "directly, NOT a comment on any ticket. Do not post it anywhere. "
+              "Treat it as instruction/question/context]:\n" + message)
     if resume_id:
-        prompt = message
-        cmd = [claude_bin(), "-p", prompt,
+        cmd = [claude_bin(), "-p", framed,
                "--allowedTools", ",".join(adapter.allowed_tools()),
                "--max-turns", MAX_TURNS, "--resume", resume_id]
     else:
-        # no session yet: seed one with the brief so it has context to chat about
         prompt = (_base_brief() + "\n\n## This source\n" + adapter.prompt_section()
-                  + "\n\nThe operator is talking to you directly (no ticket yet):\n" + message)
+                  + "\n\n" + framed)
         cmd = [claude_bin(), "-p", prompt,
                "--allowedTools", ",".join(adapter.allowed_tools()),
                "--max-turns", MAX_TURNS]
-    ok, sid, _ = _stream_turn(cmd, adapter.cwd(), env)
+    ok, sid, _ = _stream_turn(cmd, adapter.cwd(), env, emit)
     if sid:
         source.set_session_id(sid)
 
@@ -182,9 +193,14 @@ def compact(source: "config.Source", adapter) -> bool:
 
 
 def run_event(source: "config.Source", adapter, event_dict: dict,
-              interactive: bool = False) -> tuple[bool, str]:
+              interactive: bool = False, emit=None, ask=None) -> tuple[bool, str]:
     resume_id = source.session_id()
     event_json = json.dumps(event_dict, indent=1)
+
+    # operator message injected from the UI — not a ticket, extra instruction/context
+    if event_dict.get("kind") == "user_message":
+        chat(source, adapter, event_dict.get("data", {}).get("text", ""), emit=emit)
+        return True, source.session_id()
 
     mode = source.mode()
     mode_note = (
@@ -230,7 +246,8 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
             c += ["--resume", resume]
         return c
 
-    turn = _stream_turn if interactive else _one_turn
+    streaming = interactive or emit is not None
+    turn = (lambda c, w, e: _stream_turn(c, w, e, emit)) if streaming else _one_turn
     sid = resume_id
     prompt = body
     for _hop in range(4):        # allow a few approval round-trips per event
@@ -246,19 +263,23 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
         source.set_session_id(sid)
 
         # cooperative approval: did the agent ask for input?
+        # protocol: NEEDS_INPUT: <question> [:: option1 :: option2 ...]
         marker = "NEEDS_INPUT:"
         if marker in result:
-            question = result.split(marker, 1)[1].strip().splitlines()[0]
-            if interactive:
-                print(f"\n🟡 [{source.slug}] {question}")
-                ans = _timed_input("   your answer (10s, blank = let it proceed): ", 10,
-                                   timeout_note="   (no answer — proceeding on best judgment)")
-                prompt = (f"Operator answered: {ans}" if ans
-                          else "No operator answer — proceed on your best judgment "
-                               "within the hard limits, and record what you did.")
-            else:
-                prompt = ("No operator is attached — proceed on your best judgment "
-                          "within the hard limits, and record what you did.")
+            raw = result.split(marker, 1)[1].strip().splitlines()[0]
+            parts = [p.strip() for p in raw.split("::") if p.strip()]
+            question = parts[0] if parts else raw
+            options = parts[1:]
+            answer = None
+            if ask is not None:              # TUI: arrow-key "are you there?" → question
+                answer = ask(question, options)
+            elif interactive:                # plain terminal fallback
+                _out(f"🟡 {question}" + (f"  options: {options}" if options else ""), emit)
+                answer = _timed_input("   your answer (10s, blank = proceed): ", 10,
+                                      timeout_note="   (no answer — proceeding on best judgment)")
+            prompt = (f"Operator answered: {answer}" if answer
+                      else "No operator answer — proceed on your best judgment "
+                           "within the hard limits, and record what you did.")
             continue
         break
 

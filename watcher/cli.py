@@ -107,7 +107,7 @@ def _bare(args):
     - inside a git repo not yet watched → offer to add THIS project
     - otherwise → set up (if empty) or pick from the dashboard
     """
-    from . import attach, scheduler
+    from . import attach, scheduler, tui
     srcs = config.load_config()["sources"]
     cwd_repo = _cwd_repo()
 
@@ -116,7 +116,7 @@ def _bare(args):
         match = next((s for s in srcs if s.get("platform") == "github"
                       and s.get("repo") == cwd_repo), None)
         if match:
-            return attach.attach(match["slug"])
+            return tui.run(match["slug"])
         # a git repo we don't watch yet → offer to add it
         print(f"This project is `{cwd_repo}`, not watched yet.")
         if input("Add it now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
@@ -147,7 +147,7 @@ def _bare(args):
     if pick.lower() == "a":
         return cmd_add(args)
     try:
-        attach.attach(srcs[int(pick) - 1]["slug"])
+        tui.run(srcs[int(pick) - 1]["slug"])
     except (ValueError, IndexError):
         print("nothing selected.")
 
