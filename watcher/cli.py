@@ -157,13 +157,36 @@ def cmd_logs(args):
 
 
 def cmd_doctor(_args):
+    from . import scheduler
     ok = True
     for tool in ("python3", "claude", "gh"):
         path = shutil.which(tool)
         print(f"  {'✓' if path else '✗'} {tool}: {path or 'MISSING'}")
         ok = ok and bool(path)
     print(f"  watcher home: {config.HOME}")
+    print(f"  scheduler:    {scheduler.status()}")
     print("OK" if ok else "Some prerequisites missing (gh only needed for GitHub sources).")
+
+
+def cmd_start(args):
+    from . import scheduler
+    print(scheduler.start(interval=args.interval))
+
+
+def cmd_stop(_args):
+    from . import scheduler
+    print(scheduler.stop())
+
+
+def cmd_status(_args):
+    from . import scheduler
+    print(f"scheduler: {scheduler.status()}")
+    cmd_list(_args)
+
+
+def cmd_attach(args):
+    from . import attach
+    attach.attach(args.slug)
 
 
 def main(argv=None):
@@ -178,12 +201,19 @@ def main(argv=None):
     m = sub.add_parser("mode"); m.add_argument("slug"); m.add_argument("value", nargs="?")
     lg = sub.add_parser("logs"); lg.add_argument("-f", "--follow", action="store_true")
     sub.add_parser("doctor", help="check prerequisites")
+    st = sub.add_parser("start", help="install the background runner (scheduler)")
+    st.add_argument("--interval", type=int, default=120, help="poll seconds (default 120)")
+    sub.add_parser("stop", help="remove the background runner")
+    sub.add_parser("status", help="scheduler + sources overview")
+    at = sub.add_parser("attach", help="drive a source interactively (with approval prompts)")
+    at.add_argument("slug")
 
     args = p.parse_args(argv)
     if args.cmd is None:            # bare `watcher` → add flow
         return cmd_add(args)
     {"add": cmd_add, "list": cmd_list, "remove": cmd_remove, "run-once": cmd_run_once,
-     "mode": cmd_mode, "logs": cmd_logs, "doctor": cmd_doctor}[args.cmd](args)
+     "mode": cmd_mode, "logs": cmd_logs, "doctor": cmd_doctor, "start": cmd_start,
+     "stop": cmd_stop, "status": cmd_status, "attach": cmd_attach}[args.cmd](args)
 
 
 if __name__ == "__main__":

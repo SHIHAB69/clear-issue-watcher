@@ -34,7 +34,7 @@ def discover_into_queue(source: config.Source, adapter) -> int:
     return len(found)
 
 
-def drain_queue(source: config.Source, adapter) -> None:
+def drain_queue(source: config.Source, adapter, interactive: bool = False) -> None:
     while True:
         q = source.queue()
         if not q:
@@ -42,7 +42,7 @@ def drain_queue(source: config.Source, adapter) -> None:
         event = q[0]
         event["attempts"] = event.get("attempts", 0) + 1
         source.lock()                      # refresh during long runs
-        ok, _ = runtime.run_event(source, adapter, event)
+        ok, _ = runtime.run_event(source, adapter, event, interactive=interactive)
         if ok:
             source.write_queue(q[1:])
         elif event["attempts"] >= MAX_ATTEMPTS:
@@ -55,7 +55,7 @@ def drain_queue(source: config.Source, adapter) -> None:
             return                          # retry next cycle
 
 
-def run_source(slug: str) -> None:
+def run_source(slug: str, interactive: bool = False) -> None:
     source = config.Source(slug)
     if not source.meta:
         config.log(f"[{slug}] no such source; skipping")
@@ -66,7 +66,7 @@ def run_source(slug: str) -> None:
     try:
         adapter = build_adapter(source.meta)
         discover_into_queue(source, adapter)
-        drain_queue(source, adapter)
+        drain_queue(source, adapter, interactive=interactive)
     except Exception as e:  # noqa: BLE001
         config.log(f"[{slug}] ERROR: {e}")
     finally:
