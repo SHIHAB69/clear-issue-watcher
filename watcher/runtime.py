@@ -32,7 +32,7 @@ def _base_brief() -> str:
     return (Path(__file__).resolve().parent / "triage-prompt.md").read_text()
 
 
-def _timed_input(prompt: str, timeout: int = 10) -> str | None:
+def _timed_input(prompt: str, timeout: int = 10, timeout_note: str = "") -> str | None:
     """Prompt on the terminal, return the typed line, or None on timeout / no TTY."""
     import sys
     import select
@@ -45,7 +45,10 @@ def _timed_input(prompt: str, timeout: int = 10) -> str | None:
         return None
     if ready:
         return sys.stdin.readline().strip()
-    print("  (no answer — proceeding autonomously)")
+    if timeout_note:
+        print(timeout_note)
+    else:
+        print()          # clean newline after the prompt
     return None
 
 
@@ -124,6 +127,29 @@ def _one_turn(cmd, cwd, env):
     except Exception:
         result = (res.stdout or "")[-400:]
     return True, sid, result
+
+
+def chat(source: "config.Source", adapter, message: str) -> None:
+    """Send a free-form message into the source's live session and stream the
+    reply (the interactive 'chat line' between events)."""
+    import os
+    resume_id = source.session_id()
+    env = {**os.environ, **adapter.env()}
+    if resume_id:
+        prompt = message
+        cmd = [claude_bin(), "-p", prompt,
+               "--allowedTools", ",".join(adapter.allowed_tools()),
+               "--max-turns", MAX_TURNS, "--resume", resume_id]
+    else:
+        # no session yet: seed one with the brief so it has context to chat about
+        prompt = (_base_brief() + "\n\n## This source\n" + adapter.prompt_section()
+                  + "\n\nThe operator is talking to you directly (no ticket yet):\n" + message)
+        cmd = [claude_bin(), "-p", prompt,
+               "--allowedTools", ",".join(adapter.allowed_tools()),
+               "--max-turns", MAX_TURNS]
+    ok, sid, _ = _stream_turn(cmd, adapter.cwd(), env)
+    if sid:
+        source.set_session_id(sid)
 
 
 def compact(source: "config.Source", adapter) -> bool:
@@ -225,7 +251,8 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
             question = result.split(marker, 1)[1].strip().splitlines()[0]
             if interactive:
                 print(f"\n🟡 [{source.slug}] {question}")
-                ans = _timed_input("   your answer (10s, blank = let it proceed): ", 10)
+                ans = _timed_input("   your answer (10s, blank = let it proceed): ", 10,
+                                   timeout_note="   (no answer — proceeding on best judgment)")
                 prompt = (f"Operator answered: {ans}" if ans
                           else "No operator answer — proceed on your best judgment "
                                "within the hard limits, and record what you did.")

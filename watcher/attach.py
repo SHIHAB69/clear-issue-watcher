@@ -1,17 +1,25 @@
-"""The live, Claude-Code-like foreground view: `watcher` (bare, when sources
-exist) or `watcher attach <slug>`.
+"""The live, interactive foreground view: `watcher` (bare, when sources exist)
+or `watcher attach <slug>`.
 
-It drives the source in interactive mode — you SEE Claude read/think/act live
-(streamed), and when it asks `NEEDS_INPUT:` you get a terminal prompt with a
-10s window. It keeps watching on a short poll until you Ctrl-C. The background
-runner (if started) and this share a per-source lock, so they never overlap.
+Loop: process any queued events (streamed live, with the 10s approval prompt),
+then show a real input line. You can:
+  - type a message  → it's sent into the live session and the reply streams (chat)
+  - /mode full|triage, /status, /help, /quit
+  - just press Enter or wait → it polls the source for new events
+Keystrokes are consumed by the prompt (no more raw-echo leak).
+
+Note: this is turn-based chat (between/after runs), not mid-stream typing —
+`claude -p` can't accept input while a turn is streaming. The 10s go/no-go
+approval appears during a run when the agent pauses with NEEDS_INPUT.
 """
-import time
-
-from . import config, engine
+from . import config, engine, runtime
+from .adapters import build_adapter
 
 C_DIM, C_YEL, C_RESET = "\033[2m", "\033[33m", "\033[0m"
 POLL_S = 60
+
+HELP = ("commands:  <text> = chat to the session   /mode full|triage   "
+        "/status   /poll (check now)   /help   /quit")
 
 
 def attach(slug: str):
@@ -20,20 +28,37 @@ def attach(slug: str):
         print(f"✗ No source '{slug}'. See: watcher list")
         return
     ident = src.meta.get("repo") or src.meta.get("solution_name") or ""
+    adapter = build_adapter(src.meta)
     print(f"{C_YEL}╭─ watcher · {slug} · {ident} · mode={src.mode()}{C_RESET}")
-    print(f"{C_YEL}│  live — you'll be prompted if it needs you. Ctrl-C to detach.{C_RESET}")
-    print(f"{C_YEL}╰{'─'*50}{C_RESET}")
+    print(f"{C_YEL}│  live — type to chat, or wait; you'll get a 10s go/no-go if it asks.{C_RESET}")
+    print(f"{C_YEL}│  {HELP}{C_RESET}")
+    print(f"{C_YEL}╰{'─'*58}{C_RESET}")
     try:
         while True:
-            before = len(src.queue())
-            engine.run_source(slug, interactive=True)   # streams live; handles approvals
-            if before == 0 and len(src.queue()) == 0:
-                for remaining in range(POLL_S, 0, -1):
-                    print(f"\r{C_DIM}idle — watching {ident} — next check in "
-                          f"{remaining:>2}s (Ctrl-C to detach){C_RESET}",
-                          end="", flush=True)
-                    time.sleep(1)
-                print("\r" + " " * 72 + "\r", end="")
+            engine.run_source(slug, interactive=True)      # handle queued events (streamed)
+            line = runtime._timed_input(f"{C_DIM}watcher> (type, or wait {POLL_S}s to poll {ident}){C_RESET} ", POLL_S)
+            if line is None:                                # timeout → poll again
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            if line in ("/quit", "/exit", "q"):
+                break
+            if line == "/help":
+                print(HELP); continue
+            if line == "/status":
+                print(f"  {slug} · {ident} · mode={src.mode()} · queued={len(src.queue())}")
+                continue
+            if line == "/poll":
+                continue                                    # loop top re-runs discovery
+            if line.startswith("/mode"):
+                parts = line.split()
+                if len(parts) == 2 and parts[1] in ("triage", "full"):
+                    src.set_mode(parts[1]); print(f"  mode → {parts[1]}")
+                else:
+                    print("  usage: /mode full|triage")
+                continue
+            # anything else → chat into the session, streamed
+            runtime.chat(src, adapter, line)
     except KeyboardInterrupt:
-        print(f"\n{C_YEL}detached. Background runner keeps going if started "
-              f"(watcher status).{C_RESET}")
+        print(f"\n{C_YEL}detached. Background runner keeps going if started (watcher status).{C_RESET}")
