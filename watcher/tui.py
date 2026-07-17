@@ -84,9 +84,14 @@ class TUI:
                     if self.autonomous and not self.stopflag.is_set():
                         try:
                             if tick % 30 == 0 or self.force_poll.is_set():
+                                forced = self.force_poll.is_set()
                                 self.force_poll.clear()
-                                self.status = f"checking {self.ident} for new issues…"
-                                engine.discover_into_queue(self.src, self.adapter)
+                                self.status = f"checking {self.ident}…"
+                                n = engine.discover_into_queue(self.src, self.adapter)
+                                if n:
+                                    self.emit(f"· found {n} new item(s) on {self.ident}")
+                                elif forced:
+                                    self.emit(f"· checked {self.ident} — nothing new")
                             if self.src.queue():
                                 self.status = "working an issue…"
                                 engine.drain_queue(self.src, self.adapter, interactive=False,
@@ -129,7 +134,8 @@ class TUI:
             scr.refresh(); return
         mode = self.src.mode()
         auto = "AUTONOMOUS" if self.autonomous else "PAUSED"
-        head = f" watcher · {self.ident} · mode={mode} · {auto} · {self.status} "
+        last = (self.src.state().get("last_checked", "") or "")[11:19]  # HH:MM:SS
+        head = f" watcher · {self.ident} · {auto} · {self.status} · checked {last} "
         self._safe(scr, 0, 0, head.ljust(w), curses.A_REVERSE)
         # log pane: rows 1..h-3
         top, bottom = 1, h - 3
@@ -291,7 +297,11 @@ class TUI:
             pass
         t = threading.Thread(target=self.worker, daemon=True)
         t.start()
-        self.emit(f"live on {self.ident}. type a message, or /help. checking every ~60s.")
+        who = self.src.meta.get("operator_login") or self.src.meta.get("email") or "?"
+        self.emit(f"● connected to {self.ident} as {who}")
+        self.emit(f"● mode: {self.src.mode()} · checking for new activity every ~60s")
+        self.emit("● type a message to talk to it · Ctrl-C to quit")
+        self.emit("─" * 40)
         while not self.stopflag.is_set():
             with self.pendlock:
                 has_pending = self.pending is not None
@@ -323,6 +333,8 @@ def run(slug: str):
     tui = TUI(slug)
     try:
         curses.wrapper(tui._main)
+    except KeyboardInterrupt:
+        pass                       # clean exit on Ctrl-C, no traceback
     finally:
         tui.stopflag.set()
         src.set_paused(False)      # never leave the source paused after the TUI exits
