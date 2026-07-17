@@ -11,29 +11,32 @@ COMPACT_EVERY = 25        # events per source before rolling the session into me
 
 
 def discover_into_queue(source: config.Source, adapter) -> int:
-    state = source.state()
-    since = state["last_checked"]
-    processed = list(state["processed"])   # keep insertion order (trim is meaningful)
-    seen = set(processed)
+    since = source.state()["last_checked"]
+    evs = adapter.discover_events(since)   # network I/O — do it OUTSIDE the state lock
     found = []
-    for ev in adapter.discover_events(since):
-        key = f"{ev.kind}:{ev.external_id}"
-        if key in seen:
-            continue
-        seen.add(key)
-        processed.append(key)
-        if adapter.is_self_event(ev):      # anti-loop
-            continue
-        found.append(ev)
-    found.sort(key=lambda e: e.ts)         # FIFO by creation time
+
+    def _apply(s):
+        seen = set(s["processed"])
+        newp = list(s["processed"])        # insertion order → the 800-trim is meaningful
+        for ev in evs:
+            key = f"{ev.kind}:{ev.external_id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            newp.append(key)
+            if adapter.is_self_event(ev):  # anti-loop
+                continue
+            found.append(ev)
+        found.sort(key=lambda e: e.ts)     # FIFO by creation time
+        s["processed"] = newp
+        s["last_checked"] = config.now_iso()
+
+    source.update_state(_apply)            # locked read-modify-write (no lost updates)
     for ev in found:
         source.enqueue(ev.to_dict())
     if found:
         config.log(f"[{source.slug}] queued {len(found)}: "
                    + ", ".join(f"{e.kind}#{e.external_id}" for e in found))
-    state["processed"] = processed
-    state["last_checked"] = config.now_iso()
-    source.save_state(state)
     return len(found)
 
 
@@ -65,12 +68,13 @@ def drain_queue(source: config.Source, adapter, interactive: bool = False,
         if ok:
             source.write_queue(q[1:])
             # count handled events; compact the rolling session periodically
-            st = source.state()
-            st["events_since_compaction"] = st.get("events_since_compaction", 0) + 1
-            if st["events_since_compaction"] >= COMPACT_EVERY:
-                if runtime.compact(source, adapter):
-                    st["events_since_compaction"] = 0
-            source.save_state(st)
+            s2 = source.update_state(
+                lambda s: s.__setitem__("events_since_compaction",
+                                        s.get("events_since_compaction", 0) + 1))
+            if s2.get("events_since_compaction", 0) >= COMPACT_EVERY:
+                runtime.compact(source, adapter)          # network; outside the lock
+                # reset REGARDLESS of success → back off a full window, no every-event retry
+                source.update_state(lambda s: s.__setitem__("events_since_compaction", 0))
         elif event["attempts"] >= MAX_ATTEMPTS:
             config.log(f"[{source.slug}] GIVING UP {event.get('external_id')} "
                        f"after {event['attempts']} attempts")

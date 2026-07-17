@@ -24,7 +24,7 @@ def _add_github() -> dict | None:
     if r.returncode != 0:
         print("✗ Not a git repo here. Open watcher inside your project folder.")
         return None
-    url = r.stdout.strip()
+    url = r.stdout.strip().rstrip("/")     # tolerate a trailing slash on the remote URL
     import re
     m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
     if not m:
@@ -78,7 +78,10 @@ def _add_jetrix() -> dict | None:
         print(f"  {i}. {s['name']}  ({s.get('taskCount', '?')} tasks)  [{s['id']}]")
     pick = input("Pick a number: ").strip()
     try:
-        sol = sols[int(pick) - 1]
+        idx = int(pick)
+        if not 1 <= idx <= len(sols):        # reject 0/negatives (Python neg-indexing) + out of range
+            raise IndexError
+        sol = sols[idx - 1]
     except (ValueError, IndexError):
         print("✗ Invalid choice.")
         return None
@@ -97,7 +100,7 @@ def _cwd_repo() -> str | None:
     if u.returncode != 0:
         return None
     import re
-    m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", u.stdout.strip())
+    m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", u.stdout.strip().rstrip("/"))
     return m.group(1) if m else None
 
 
@@ -126,10 +129,13 @@ def _bare(args):
                 config.Source(meta["slug"]).set_mode("full")
                 print(f"✓ Added '{meta['slug']}' (full mode — unlocked).")
                 if input("Open its live view now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
-                    tui.run(meta["slug"])
-        return
+                    return tui.run(meta["slug"])
+                return
+        if not srcs:
+            return          # declined and nothing else to open
+        # otherwise fall through to the picker so existing sources stay reachable
 
-    # 2) not in a project — set up if empty, else pick
+    # 2) not in a project (or declined above with sources present) — set up or pick
     if not srcs:
         print("👋 No sources yet — let's set one up.\n")
         cmd_add(args)

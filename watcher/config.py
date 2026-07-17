@@ -3,14 +3,38 @@ each source gets its own namespaced folder so nothing collides."""
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX file locking for concurrent state RMW
+except ImportError:  # Windows
+    fcntl = None
 
 HOME = Path(os.environ.get("WATCHER_HOME", Path.home() / ".watcher"))
 CONFIG = HOME / "config.json"
 LOG = HOME / "watcher.log"
 SESSIONS = HOME / "sessions.tsv"
+
+
+def _atomic_write(path: Path, data: str) -> None:
+    """Write via temp file + os.replace so a crash mid-write can't corrupt/truncate."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def now_iso() -> str:
@@ -34,8 +58,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    HOME.mkdir(parents=True, exist_ok=True)
-    CONFIG.write_text(json.dumps(cfg, indent=2))
+    _atomic_write(CONFIG, json.dumps(cfg, indent=2))
 
 
 def get_source(slug: str) -> dict | None:
@@ -95,22 +118,50 @@ class Source:
     # --- state ---
     def state(self) -> dict:
         if self._state.exists():
-            return json.loads(self._state.read_text())
+            try:
+                return json.loads(self._state.read_text())
+            except (json.JSONDecodeError, OSError):   # corrupt → self-heal to default
+                pass
         return {"last_checked": now_iso(), "processed": []}
 
     def save_state(self, s: dict) -> None:
         s["processed"] = s["processed"][-800:]
+        _atomic_write(self._state, json.dumps(s, indent=1))
+
+    def update_state(self, mutate) -> dict:
+        """Locked read-modify-write: read INSIDE an exclusive lock, let `mutate`
+        touch only its own fields, atomic-write. Prevents lost updates when the
+        TUI worker and the background runner overlap."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._state.write_text(json.dumps(s, indent=1))
+        lockf = self.dir / "state.lock"
+        with open(lockf, "w") as lf:
+            if fcntl:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                s = self.state()
+                mutate(s)
+                self.save_state(s)
+                return s
+            finally:
+                if fcntl:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
 
     # --- queue (FIFO) ---
     def queue(self) -> list[dict]:
         if not self._queue.exists():
             return []
-        return [json.loads(l) for l in self._queue.read_text().splitlines() if l.strip()]
+        out = []
+        for l in self._queue.read_text().splitlines():
+            if not l.strip():
+                continue
+            try:
+                out.append(json.loads(l))
+            except json.JSONDecodeError:   # skip a torn line rather than crash
+                continue
+        return out
 
     def write_queue(self, events: list[dict]) -> None:
-        self._queue.write_text("".join(json.dumps(e) + "\n" for e in events))
+        _atomic_write(self._queue, "".join(json.dumps(e) + "\n" for e in events))
 
     def enqueue(self, event: dict) -> None:
         with self._queue.open("a") as f:

@@ -26,6 +26,10 @@ class GitHubAdapter(Adapter):
         self.repo = meta["repo"]
         self.project_dir = meta["project_dir"]
         self.me = meta.get("operator_login", "")
+        if not self.me:
+            # anti-loop AND the activity self-filter depend on knowing who we are;
+            # an empty identity would make the watcher react to its own actions forever.
+            raise ValueError("operator_login is required for a GitHub source")
 
     # gh runs under the scoped config dir if provided (keeps global gh untouched)
     def env(self) -> dict:
@@ -51,9 +55,9 @@ class GitHubAdapter(Adapter):
 
     def discover_events(self, since: str) -> list[Event]:
         events: list[Event] = []
-        # new issues
-        for it in self._gh(["api", f"repos/{self.repo}/issues", "-X", "GET",
-                            "-f", f"since={since}", "-f", "state=all", "-f", "per_page=50"]):
+        # new issues (--paginate: don't drop >per_page new issues; `since` bounds it)
+        for it in self._gh(["api", "--paginate", f"repos/{self.repo}/issues", "-X", "GET",
+                            "-f", f"since={since}", "-f", "state=all", "-f", "per_page=100"]):
             if "pull_request" in it or it.get("created_at", "") < since:
                 continue
             events.append(Event(self.slug, "new_issue", str(it["id"]),
@@ -61,10 +65,12 @@ class GitHubAdapter(Adapter):
                                 it.get("html_url", ""),
                                 data={"issue_number": it["number"],
                                       "author": it["user"]["login"]}))
-        # comments (anyone; self-signed skipped in is_self_event)
-        for c in self._gh(["api", f"repos/{self.repo}/issues/comments", "-X", "GET",
-                          "-f", f"since={since}", "-f", "per_page=50"]):
+        # comments (anyone; self-signed skipped in is_self_event). --paginate to not drop.
+        for c in self._gh(["api", "--paginate", f"repos/{self.repo}/issues/comments", "-X", "GET",
+                          "-f", f"since={since}", "-f", "per_page=100"]):
             if c.get("created_at", "") < since:
+                continue
+            if "/pull/" in (c.get("html_url", "") or ""):   # PR conversation comment — skip
                 continue
             body = c.get("body", "") or ""
             num = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
@@ -74,21 +80,34 @@ class GitHubAdapter(Adapter):
                                 data={"issue_number": num,
                                       "comment_author": c["user"]["login"],
                                       "comment_body": body[:2000],
-                                      "_self": c["user"]["login"] == self.me and SIGNATURE in body}))
-        # issue activity (no since filter on this API → last 100, filter client-side)
-        for ev in self._gh(["api", f"repos/{self.repo}/issues/events", "-X", "GET", "-f", "per_page=100"]):
-            if (ev.get("created_at") or "") <= since or ev.get("event") not in MEANINGFUL_EVENTS:
-                continue
-            if (ev.get("actor") or {}).get("login") == self.me:   # bot's own action
-                continue
-            iss = ev.get("issue") or {}
-            if "pull_request" in iss or not iss.get("number"):
-                continue
-            events.append(Event(self.slug, "activity", str(ev["id"]), ev["created_at"],
-                                "", iss.get("html_url", ""),
-                                data={"issue_number": iss["number"],
-                                      "action": ev.get("event"),
-                                      "actor": (ev.get("actor") or {}).get("login")}))
+                                      "_self": SIGNATURE in body}))
+        # issue activity (endpoint has no `since`; newest-first → page until we cross `since`)
+        page, MAX_PAGES = 1, 20      # ~2000 events/poll safety cap
+        while page <= MAX_PAGES:
+            batch = self._gh(["api", f"repos/{self.repo}/issues/events", "-X", "GET",
+                             "-f", "per_page=100", "-f", f"page={page}"])
+            if not batch:
+                break
+            crossed = False
+            for ev in batch:
+                if (ev.get("created_at") or "") <= since:
+                    crossed = True            # this + all later pages are older
+                    continue
+                if ev.get("event") not in MEANINGFUL_EVENTS:
+                    continue
+                if (ev.get("actor") or {}).get("login") == self.me:   # bot's own action
+                    continue
+                iss = ev.get("issue") or {}
+                if "pull_request" in iss or not iss.get("number"):
+                    continue
+                events.append(Event(self.slug, "activity", str(ev["id"]), ev["created_at"],
+                                    "", iss.get("html_url", ""),
+                                    data={"issue_number": iss["number"],
+                                          "action": ev.get("event"),
+                                          "actor": (ev.get("actor") or {}).get("login")}))
+            if crossed:
+                break
+            page += 1
         return events
 
     def is_self_event(self, event: Event) -> bool:

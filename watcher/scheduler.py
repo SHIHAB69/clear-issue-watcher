@@ -80,7 +80,7 @@ def _systemd_dir() -> Path:
 
 def _linux_start(interval: int, env: dict):
     if not shutil.which("systemctl"):
-        return _cron_start(interval)
+        return _cron_start(interval, env)
     d = _systemd_dir()
     d.mkdir(parents=True, exist_ok=True)
     envlines = "\n".join(f'Environment="{k}={v}"' for k, v in env.items())
@@ -118,9 +118,11 @@ def _linux_status():
 _CRON_MARK = "# watcher-runner"
 
 
-def _cron_start(interval: int):
+def _cron_start(interval: int, env: dict | None = None):
     # cron granularity is 1 min; run every minute, the per-source lock dedupes.
-    line = f"* * * * * {' '.join(_run_cmd())}  {_CRON_MARK}"
+    path = (env or {}).get("PATH", "")
+    prefix = f'PATH="{path}" ' if path else ""     # cron has a minimal PATH by default
+    line = f"* * * * * {prefix}{' '.join(_run_cmd())}  {_CRON_MARK}"
     cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
     cur = "\n".join(l for l in cur.splitlines() if _CRON_MARK not in l)
     subprocess.run(["crontab", "-"], input=cur + "\n" + line + "\n", text=True)
@@ -160,7 +162,9 @@ def _windows_status():
 
 # ---------------- dispatch ----------------
 def start(interval: int = DEFAULT_INTERVAL, env: dict | None = None) -> str:
-    env = env or {}
+    # capture the installer's PATH (nvm/npm dirs for claude/gh) for ALL backends,
+    # not just macOS — otherwise scheduled Linux/Windows runs can't find claude/gh.
+    env = {"PATH": os.environ.get("PATH", ""), **(env or {})}
     return {"macos": _macos_start, "linux": _linux_start, "windows": _windows_start}\
         .get(_os(), lambda *_: "unsupported OS")(interval, env)
 

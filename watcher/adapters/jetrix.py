@@ -16,11 +16,22 @@ Trigger source is the merged /activity feed (comments + activity incl. created).
 import json
 import urllib.request
 import urllib.error
+from datetime import datetime
 from pathlib import Path
 
 from .base import Adapter, Event
 from ..runtime import SIGNATURE
 from .. import config
+
+
+def _parse_iso(s: str):
+    """Parse an ISO timestamp tolerantly (handles Z, offsets, ms). None on failure."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class JetrixAdapter(Adapter):
@@ -31,6 +42,9 @@ class JetrixAdapter(Adapter):
         self.base = meta["base_url"].rstrip("/")
         self.solution_id = meta["solution_id"]
         self.email = meta.get("email", "")
+        if not self.email:
+            # mentions-me/assigned-me filter + anti-loop depend on knowing who we are
+            raise ValueError("email is required for a Jetrix source")
 
     # --- key handling ---
     def _key_path(self) -> Path:
@@ -75,6 +89,7 @@ class JetrixAdapter(Adapter):
         events: list[Event] = []
         before = ""
         reached_boundary = False
+        since_dt = _parse_iso(since)
         while True:
             path = f"/dev/solutions/{self.solution_id}/activity?since={since}&limit=200"
             if before:
@@ -83,7 +98,8 @@ class JetrixAdapter(Adapter):
             items = resp.get("items", [])
             for it in items:
                 created = it.get("createdAt", "")
-                if created <= since:
+                created_dt = _parse_iso(created)
+                if since_dt and created_dt and created_dt <= since_dt:
                     # items are newest-first: once we hit `since`, everything
                     # older (this page's tail + all further pages) is old news.
                     reached_boundary = True

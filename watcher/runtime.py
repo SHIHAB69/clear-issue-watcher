@@ -8,6 +8,8 @@ popped by the caller.
 import json
 import shutil
 import subprocess
+import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,31 +92,45 @@ def _stream_turn(cmd, cwd, env, emit=None):
     """Run a turn with live streaming output. Returns (ok, session_id, result_text)."""
     scmd = cmd + ["--output-format", "stream-json", "--verbose"]
     sid, result = "", ""
+    diag = deque(maxlen=20)          # keep last non-JSON (stderr) lines for diagnostics
     try:
         # stderr→stdout so a full stderr pipe can't deadlock while we read stdout;
-        # non-JSON (stderr) lines are simply skipped by the parser below.
+        # non-JSON (stderr) lines are captured in `diag` and skipped by the parser.
         proc = subprocess.Popen(scmd, cwd=cwd, env=env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except Exception as e:  # noqa: BLE001
         return False, "", str(e)
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if obj.get("type") == "system" and obj.get("subtype") == "init":
-            sid = obj.get("session_id", sid) or sid
-        elif obj.get("type") == "result":
-            sid = obj.get("session_id", sid) or sid
-            result = obj.get("result") or ""
-        else:
-            _render_stream_event(obj, emit)
-    proc.wait()
+    # watchdog: a fully silent hang blocks `for line in proc.stdout` forever;
+    # kill after TIMEOUT_S so the worker can't wedge. proc.kill() sends EOF → loop ends.
+    timed_out = threading.Event()
+    watchdog = threading.Timer(TIMEOUT_S, lambda: (timed_out.set(), proc.kill()))
+    watchdog.start()
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                diag.append(line)
+                continue
+            if obj.get("type") == "system" and obj.get("subtype") == "init":
+                sid = obj.get("session_id", sid) or sid
+            elif obj.get("type") == "result":
+                sid = obj.get("session_id", sid) or sid
+                result = obj.get("result") or ""
+            else:
+                _render_stream_event(obj, emit)
+        proc.wait()
+    finally:
+        watchdog.cancel()
+    if timed_out.is_set():
+        return False, sid, "__timeout__"
     if proc.returncode != 0:
-        return False, sid, f"stream turn exited rc={proc.returncode}"
+        tail = " | ".join(diag)
+        return False, sid, (f"rc={proc.returncode} :: {tail}" if tail
+                            else f"stream turn exited rc={proc.returncode}")
     return True, sid, result
 
 
@@ -138,7 +154,7 @@ def _one_turn(cmd, cwd, env):
     return True, sid, result
 
 
-def chat(source: "config.Source", adapter, message: str, emit=None) -> None:
+def chat(source: "config.Source", adapter, message: str, emit=None) -> bool:
     """Send an operator message into the source's live session and stream the
     reply. Framed as an OPERATOR MESSAGE, not an issue comment — Claude treats
     it as extra instruction/context, never posts it as a ticket comment."""
@@ -158,9 +174,14 @@ def chat(source: "config.Source", adapter, message: str, emit=None) -> None:
         cmd = [claude_bin(), "-p", prompt,
                "--allowedTools", ",".join(adapter.allowed_tools()),
                "--max-turns", MAX_TURNS]
-    ok, sid, _ = _stream_turn(cmd, adapter.cwd(), env, emit)
+    ok, sid, result = _stream_turn(cmd, adapter.cwd(), env, emit)
     if sid:
         source.set_session_id(sid)
+    if not ok:
+        hint = " — AUTH may be expired; re-login" if any(
+            m in (result or "").lower() for m in _AUTH_MARKERS) else ""
+        config.log(f"[{source.slug}] chat FAILED{hint} :: {result}")
+    return ok
 
 
 def compact(source: "config.Source", adapter) -> bool:
@@ -199,8 +220,8 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
 
     # operator message injected from the UI — not a ticket, extra instruction/context
     if event_dict.get("kind") == "user_message":
-        chat(source, adapter, event_dict.get("data", {}).get("text", ""), emit=emit)
-        return True, source.session_id()
+        ok = chat(source, adapter, event_dict.get("data", {}).get("text", ""), emit=emit)
+        return ok, source.session_id()   # propagate failure so it retries, not silently lost
 
     mode = source.mode()
     mode_note = (
@@ -262,11 +283,15 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
         sid = new_sid or sid
         source.set_session_id(sid)
 
-        # cooperative approval: did the agent ask for input?
+        # cooperative approval: the agent asks by ending with a CONTROL LINE
+        # (last non-empty line) — not a stray mention in prose/quotes/code.
         # protocol: NEEDS_INPUT: <question> [:: option1 :: option2 ...]
         marker = "NEEDS_INPUT:"
-        if marker in result:
-            raw = result.split(marker, 1)[1].strip().splitlines()[0]
+        rlines = [ln.strip() for ln in (result or "").splitlines() if ln.strip()]
+        if rlines and rlines[-1].startswith(marker):
+            raw = rlines[-1][len(marker):].strip()
+            if not raw:                      # bare marker, no question → nothing to ask
+                break
             parts = [p.strip() for p in raw.split("::") if p.strip()]
             question = parts[0] if parts else raw
             options = parts[1:]
@@ -278,10 +303,19 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
                 answer = _timed_input("   your answer (10s, blank = proceed): ", 10,
                                       timeout_note="   (no answer — proceeding on best judgment)")
             prompt = (f"Operator answered: {answer}" if answer
-                      else "No operator answer — proceed on your best judgment "
-                           "within the hard limits, and record what you did.")
+                      else "No operator answer — take the SAFE path on your best judgment "
+                           "(do NOT perform dangerous/irreversible actions); if a dangerous "
+                           "action is what's needed, post a comment explaining what you propose, "
+                           "why, and the risk, and ask for approval on the ticket.")
             continue
         break
+    else:
+        # loop exhausted with the last hop STILL asking — the ask was never resolved.
+        # Do not report success; return False so drain_queue retries the same session.
+        tail = (result or "")[-300:].replace("\n", " | ")
+        config.log(f"[{source.slug}] handle UNRESOLVED — approval cap exhausted, "
+                   f"still awaiting input :: {tail}")
+        return False, sid
 
     tail = (result or "")[-300:].replace("\n", " | ")
     with config.SESSIONS.open("a") as f:

@@ -24,9 +24,13 @@ HELP = ("commands:  <text> = quick chat   /chat = open full Claude TUI   "
 
 
 def attach(slug: str):
+    import sys
     src = config.Source(slug)
     if not src.meta:
         print(f"✗ No source '{slug}'. See: watcher list")
+        return
+    if not sys.stdin or not sys.stdin.isatty():   # attach is inherently interactive
+        print("✗ watcher attach needs an interactive terminal (stdin is not a TTY).")
         return
     ident = src.meta.get("repo") or src.meta.get("solution_name") or ""
     adapter = build_adapter(src.meta)

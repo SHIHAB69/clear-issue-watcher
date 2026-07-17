@@ -41,6 +41,8 @@ class TUI:
         self.pending = None                       # (question, options, Event, holder[])
         self.pendlock = threading.Lock()
         self._suspend = threading.Event()         # pause worker during /chat
+        self._busy = threading.Event()            # worker is mid-turn (don't handoff/quit over it)
+        self.force_poll = threading.Event()       # /poll → discover now
 
     # ---------- worker (background thread) ----------
     def emit(self, line):
@@ -52,7 +54,13 @@ class TUI:
         ev = threading.Event(); holder = []
         with self.pendlock:
             self.pending = (question, options, ev, holder)
-        ev.wait()                                 # main thread services it
+        # wait for the main thread to service it, but stay responsive to /quit so
+        # teardown (finally: set_paused(False)) isn't blocked forever on an ask.
+        while not ev.wait(0.2):
+            if self.stopflag.is_set():
+                with self.pendlock:
+                    self.pending = None
+                return None
         return holder[0] if holder else None
 
     def worker(self):
@@ -62,29 +70,34 @@ class TUI:
             while not self.stopflag.is_set():
                 if self._suspend.is_set():
                     time.sleep(0.2); continue
-                # operator messages always handled (even when autonomous is off)
-                while self.msgq and not self.stopflag.is_set():
-                    text = self.msgq.popleft()
-                    self.status = "answering you"
-                    try:
-                        runtime.chat(self.src, self.adapter, text, emit=self.emit)
-                    except Exception as e:  # noqa: BLE001
-                        self.emit(f"[error] {e}")
-                # autonomous issue processing
-                if self.autonomous and not self.stopflag.is_set():
-                    try:
-                        if tick % 30 == 0:
-                            self.status = f"checking {self.ident} for new issues…"
-                            engine.discover_into_queue(self.src, self.adapter)
-                        if self.src.queue():
-                            self.status = "working an issue…"
-                            engine.drain_queue(self.src, self.adapter, interactive=False,
-                                               emit=self.emit, ask=self.ask)
-                    except Exception as e:  # noqa: BLE001
-                        self.emit(f"[error] {e}")
+                self._busy.set()
+                try:
+                    # operator messages always handled (even when autonomous is off)
+                    while self.msgq and not self.stopflag.is_set():
+                        text = self.msgq.popleft()
+                        self.status = "answering you"
+                        try:
+                            runtime.chat(self.src, self.adapter, text, emit=self.emit)
+                        except Exception as e:  # noqa: BLE001
+                            self.emit(f"[error] {e}")
+                    # autonomous issue processing
+                    if self.autonomous and not self.stopflag.is_set():
+                        try:
+                            if tick % 30 == 0 or self.force_poll.is_set():
+                                self.force_poll.clear()
+                                self.status = f"checking {self.ident} for new issues…"
+                                engine.discover_into_queue(self.src, self.adapter)
+                            if self.src.queue():
+                                self.status = "working an issue…"
+                                engine.drain_queue(self.src, self.adapter, interactive=False,
+                                                   emit=self.emit, ask=self.ask)
+                        except Exception as e:  # noqa: BLE001
+                            self.emit(f"[error] {e}")
+                finally:
+                    self._busy.clear()
                 self.status = "idle" if self.autonomous else "paused — /start to resume"
                 for _ in range(20):               # ~2s, responsive
-                    if self.stopflag.is_set() or self.msgq:
+                    if self.stopflag.is_set() or self.msgq or self.force_poll.is_set():
                         break
                     time.sleep(0.1)
                 tick += 1
@@ -92,46 +105,76 @@ class TUI:
             self.src.set_paused(False)
 
     # ---------- rendering (main thread) ----------
+    @staticmethod
+    def _safe(scr, y, x, text, attr=0):
+        """Bounds-checked write that never touches the bottom-right corner cell
+        (which raises curses.error) and never draws off-screen."""
+        h, w = scr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        # leave the final column free on every row so the cursor can't be pushed
+        # off the bottom-right corner (the classic addnwstr ERR)
+        maxlen = w - x - 1
+        if maxlen <= 0:
+            return
+        try:
+            scr.addnstr(y, x, str(text), maxlen, attr)
+        except curses.error:
+            pass
+
     def _draw(self, scr):
         scr.erase()
         h, w = scr.getmaxyx()
+        if h < 3 or w < 10:
+            scr.refresh(); return
         mode = self.src.mode()
         auto = "AUTONOMOUS" if self.autonomous else "PAUSED"
         head = f" watcher · {self.ident} · mode={mode} · {auto} · {self.status} "
-        scr.addnstr(0, 0, head.ljust(w), w, curses.A_REVERSE)
+        self._safe(scr, 0, 0, head.ljust(w), curses.A_REVERSE)
         # log pane: rows 1..h-3
         top, bottom = 1, h - 3
-        rows = bottom - top + 1
+        rows = max(1, bottom - top + 1)
         with self.loglock:
             lines = list(self.log)
-        view = lines[-rows:] if self.scroll == 0 else lines[max(0, len(lines) - rows - self.scroll):
-                                                             len(lines) - self.scroll]
+        self.scroll = max(0, min(self.scroll, max(0, len(lines) - rows)))  # bound scroll (#25)
+        end = len(lines) - self.scroll
+        view = lines[max(0, end - rows):end]
         for i, line in enumerate(view):
-            scr.addnstr(top + i, 0, line, w - 1)
-        scr.addnstr(h - 2, 0, ("─" * w), w)
+            self._safe(scr, top + i, 0, line)
+        self._safe(scr, h - 2, 0, "─" * (w - 1))
         prompt = "› " + self.inp
-        scr.addnstr(h - 1, 0, prompt.ljust(w), w)
-        scr.move(h - 1, min(len(prompt), w - 1))
+        self._safe(scr, h - 1, 0, prompt.ljust(w))
+        try:
+            scr.move(h - 1, min(len(prompt), w - 2))
+        except curses.error:
+            pass
         scr.refresh()
 
     def _select(self, scr, title, options, timeout=None):
-        """Arrow-key select. Returns index, or None on timeout/Esc."""
+        """Arrow-key select. Returns index, or None on timeout/Esc. Scrolls the
+        option list and never writes off-screen or the bottom-right corner."""
         idx = 0
         deadline = (time.time() + timeout) if timeout else None
         scr.nodelay(True)
         while True:
             h, w = scr.getmaxyx()
             scr.erase()
-            scr.addnstr(0, 0, " watcher — needs your input ".ljust(w), w, curses.A_REVERSE)
-            scr.addnstr(2, 2, title[:w - 4], w - 4, curses.A_BOLD)
-            for i, opt in enumerate(options):
-                marker = "❯ " if i == idx else "  "
+            self._safe(scr, 0, 0, " watcher — needs your input ".ljust(w), curses.A_REVERSE)
+            self._safe(scr, 2, 2, title, curses.A_BOLD)
+            avail = max(1, (h - 1) - 4)            # rows 4 .. h-2 usable; h-1 = footer
+            first = max(0, idx - avail + 1)
+            for i in range(first, len(options)):
+                row = 4 + (i - first)
+                if row >= h - 1:                   # never reach the footer row
+                    break
+                marker = "> " if i == idx else "  "
                 attr = curses.A_REVERSE if i == idx else curses.A_NORMAL
-                scr.addnstr(4 + i, 4, (marker + str(opt))[:w - 6], w - 6, attr)
+                self._safe(scr, row, 4, marker + str(options[i]), attr)
             if deadline:
                 left = max(0, int(deadline - time.time()))
-                scr.addnstr(4 + len(options) + 1, 4, f"(auto in {left}s → safe path)", w - 6, curses.A_DIM)
-            scr.addnstr(h - 1, 0, " ↑/↓ move · Enter select · Esc = safe ".ljust(w), w, curses.A_DIM)
+                hint_row = min(4 + (len(options) - first) + 1, h - 2)
+                self._safe(scr, hint_row, 4, f"(auto in {left}s -> safe path)", curses.A_DIM)
+            self._safe(scr, h - 1, 0, " up/down move · Enter select · Esc = safe ".ljust(w), curses.A_DIM)
             scr.refresh()
             ch = scr.getch()
             if ch in (curses.KEY_UP, ord("k")):
@@ -139,15 +182,19 @@ class TUI:
             elif ch in (curses.KEY_DOWN, ord("j")):
                 idx = (idx + 1) % len(options)
             elif ch in (curses.KEY_ENTER, 10, 13):
-                scr.nodelay(True); return idx
+                return idx
             elif ch == 27:                         # Esc
-                scr.nodelay(True); return None
+                return None
             if deadline and time.time() >= deadline:
-                scr.nodelay(True); return None
+                return None
             time.sleep(0.03)
 
     def _read_line(self, scr, label):
-        curses.echo(); curses.curs_set(1)
+        curses.echo()
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
         h, w = scr.getmaxyx()
         scr.erase()
         scr.addnstr(2, 2, label, w - 4, curses.A_BOLD)
@@ -186,6 +233,13 @@ class TUI:
 
     def _chat_handoff(self, scr):
         self._suspend.set()
+        # wait for any in-progress worker turn to finish so we don't run two
+        # sessions on the same session id concurrently (corruption).
+        waited = 0.0
+        while self._busy.is_set() and waited < 180:
+            self._safe(scr, 0, 0, " finishing current turn before handing off… ".ljust(1),
+                       curses.A_REVERSE)
+            scr.refresh(); time.sleep(0.3); waited += 0.3
         curses.endwin()
         sid = self.src.session_id()
         cmd = [shutil.which("claude") or "claude"] + (["--resume", sid] if sid else [])
@@ -211,7 +265,7 @@ class TUI:
         if line in ("/start", "/resume"):
             self.autonomous = True; self.emit("▶ autonomous resumed"); return
         if line == "/poll":
-            self.emit("… checking now"); self._force_poll = True; return
+            self.emit("… checking now"); self.force_poll.set(); return
         if line.startswith("/mode"):
             p = line.split()
             if len(p) == 2 and p[1] in ("triage", "full"):
@@ -226,7 +280,10 @@ class TUI:
         self.msgq.append(line)
 
     def _main(self, scr):
-        curses.curs_set(1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
         scr.nodelay(True)
         try:
             curses.use_default_colors()
@@ -264,5 +321,9 @@ def run(slug: str):
         print(f"✗ No source '{slug}'.")
         return
     tui = TUI(slug)
-    curses.wrapper(tui._main)
+    try:
+        curses.wrapper(tui._main)
+    finally:
+        tui.stopflag.set()
+        src.set_paused(False)      # never leave the source paused after the TUI exits
     print("watcher closed.")
