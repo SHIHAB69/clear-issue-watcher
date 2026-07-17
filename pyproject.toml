@@ -1,0 +1,16 @@
+[project]
+name = "watcher"
+version = "0.2.0"
+description = "A persistent Claude Code runtime that watches task sources (GitHub, Jetrix) and handles issues like a senior engineer."
+requires-python = ">=3.10"
+dependencies = []          # stdlib only (urllib, subprocess) — no third-party deps
+
+[project.scripts]
+watcher = "watcher.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["watcher", "watcher.adapters"]
