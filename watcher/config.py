@@ -127,9 +127,9 @@ class Source:
     def clear_session(self) -> None:
         self._session.unlink(missing_ok=True)
 
-    # --- mode ---
+    # --- mode --- (full by default: the watcher runs unlocked, no config needed)
     def mode(self) -> str:
-        return self._mode.read_text().strip() if self._mode.exists() else "triage"
+        return self._mode.read_text().strip() if self._mode.exists() else "full"
 
     def set_mode(self, m: str) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)

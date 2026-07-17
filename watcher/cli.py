@@ -123,10 +123,10 @@ def _bare(args):
             meta = _add_github()
             if meta:
                 config.add_source(meta)
-                config.Source(meta["slug"]).set_mode("triage")
-                print(f"✓ Added '{meta['slug']}' (triage mode).")
+                config.Source(meta["slug"]).set_mode("full")
+                print(f"✓ Added '{meta['slug']}' (full mode — unlocked).")
                 if input("Open its live view now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
-                    attach.attach(meta["slug"])
+                    tui.run(meta["slug"])
         return
 
     # 2) not in a project — set up if empty, else pick
@@ -162,10 +162,10 @@ def cmd_add(_args):
     config.add_source(meta)
     if key:  # store jetrix key in the source's gitignored dir, not config.json
         (config.Source(meta["slug"]).dir / "key").write_text(key)
-    config.Source(meta["slug"]).set_mode("triage")
-    print(f"\n✓ Added source '{meta['slug']}' in triage mode.")
-    print("  Test it now:   watcher run-once " + meta["slug"])
-    print("  Go autonomous: watcher start   (installs the background runner)")
+    config.Source(meta["slug"]).set_mode("full")
+    print(f"\n✓ Added source '{meta['slug']}' — full mode (unlocked, no config needed).")
+    print("  Open it:       watcher   (from the project dir)")
+    print("  Background:    watcher start")
 
 
 def cmd_list(_args):
@@ -326,7 +326,7 @@ def cmd_migrate_legacy(_args):
         st["last_checked"] = last
     src.save_state(st)
     old_mode = (legacy / "mode")
-    src.set_mode(old_mode.read_text().strip() if old_mode.exists() else "triage")
+    src.set_mode(old_mode.read_text().strip() if old_mode.exists() else "full")
     print(f"✓ Migrated '{repo}' → source '{meta['slug']}' "
           f"(mode={src.mode()}, gh_config_dir={gh_dir or 'default'}, last_checked preserved).")
     print("\nNow switch schedulers so only ONE runner is active:")
