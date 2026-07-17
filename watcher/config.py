@@ -135,6 +135,18 @@ class Source:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._mode.write_text(m)
 
+    # --- rolling-session memory (compaction) ---
+    @property
+    def _memory(self) -> Path:
+        return self.dir / "memory.md"
+
+    def memory(self) -> str:
+        return self._memory.read_text() if self._memory.exists() else ""
+
+    def set_memory(self, text: str) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._memory.write_text(text)
+
     # --- lock (per source) ---
     def locked(self, stale_s: int = 3600) -> bool:
         return self._lock.exists() and time.time() - self._lock.stat().st_mtime < stale_s

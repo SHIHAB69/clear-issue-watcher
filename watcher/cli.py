@@ -189,6 +189,51 @@ def cmd_attach(args):
     attach.attach(args.slug)
 
 
+def cmd_migrate_legacy(_args):
+    """Import the legacy single-file watcher (~/.clear-issue-watcher) as a source."""
+    import plistlib
+    legacy = Path.home() / ".clear-issue-watcher"
+    lcfg = legacy / "config.json"
+    if not lcfg.exists():
+        print("✗ No legacy config at ~/.clear-issue-watcher/config.json — nothing to migrate.")
+        return
+    old = json.loads(lcfg.read_text())
+    repo = old.get("github_repo"); pdir = old.get("project_dir")
+    login = old.get("operator_login", "")
+    if not repo or not pdir:
+        print("✗ Legacy config missing github_repo/project_dir.")
+        return
+    # find GH_CONFIG_DIR from the old launchd plist, if any
+    gh_dir = ""
+    plist = Path.home() / "Library/LaunchAgents/com.clear.issue-watcher.plist"
+    if plist.exists():
+        try:
+            gh_dir = plistlib.loads(plist.read_bytes()).get("EnvironmentVariables", {}).get("GH_CONFIG_DIR", "")
+        except Exception:
+            pass
+    meta = {"slug": config.slugify("github", repo), "platform": "github",
+            "repo": repo, "project_dir": pdir, "operator_login": login}
+    if gh_dir:
+        meta["gh_config_dir"] = gh_dir
+    config.add_source(meta)
+    src = config.Source(meta["slug"])
+    # preserve last_checked so the backlog isn't re-triaged; fresh processed set
+    old_state = legacy / "state.json"
+    last = json.loads(old_state.read_text()).get("last_checked") if old_state.exists() else None
+    st = src.state()
+    if last:
+        st["last_checked"] = last
+    src.save_state(st)
+    old_mode = (legacy / "mode")
+    src.set_mode(old_mode.read_text().strip() if old_mode.exists() else "triage")
+    print(f"✓ Migrated '{repo}' → source '{meta['slug']}' "
+          f"(mode={src.mode()}, gh_config_dir={gh_dir or 'default'}, last_checked preserved).")
+    print("\nNow switch schedulers so only ONE runner is active:")
+    print("  launchctl unload ~/Library/LaunchAgents/com.clear.issue-watcher.plist   # stop legacy")
+    print("  watcher start                                                            # start new engine")
+    print("  watcher list")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="watcher",
                                 description="persistent Claude Code runtime for task sources")
@@ -207,13 +252,15 @@ def main(argv=None):
     sub.add_parser("status", help="scheduler + sources overview")
     at = sub.add_parser("attach", help="drive a source interactively (with approval prompts)")
     at.add_argument("slug")
+    sub.add_parser("migrate-legacy", help="import the old ~/.clear-issue-watcher as a source")
 
     args = p.parse_args(argv)
     if args.cmd is None:            # bare `watcher` → add flow
         return cmd_add(args)
     {"add": cmd_add, "list": cmd_list, "remove": cmd_remove, "run-once": cmd_run_once,
      "mode": cmd_mode, "logs": cmd_logs, "doctor": cmd_doctor, "start": cmd_start,
-     "stop": cmd_stop, "status": cmd_status, "attach": cmd_attach}[args.cmd](args)
+     "stop": cmd_stop, "status": cmd_status, "attach": cmd_attach,
+     "migrate-legacy": cmd_migrate_legacy}[args.cmd](args)
 
 
 if __name__ == "__main__":

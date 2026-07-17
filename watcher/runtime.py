@@ -68,6 +68,35 @@ def _one_turn(cmd, cwd, env):
     return True, sid, result
 
 
+def compact(source: "config.Source", adapter) -> bool:
+    """Summarize the rolling session into a durable memory doc, then start fresh.
+    Keeps long-lived sessions from growing slow/stale while preserving knowledge.
+    """
+    resume_id = source.session_id()
+    if not resume_id:
+        return False
+    import os
+    env = {**os.environ, **adapter.env()}
+    prompt = (
+        "Compaction step (not a ticket). Distill everything important you've "
+        "learned about THIS project/source in your session so far into a concise "
+        "engineering-memory doc a fresh session could load to be immediately "
+        "effective: architecture & domain, conventions, stakeholders/who's who, "
+        "recurring issues, decisions made, and any open/unfinished threads. "
+        "Output ONLY the memory doc in markdown, no preamble."
+    )
+    cmd = [claude_bin(), "-p", prompt, "--output-format", "json",
+           "--max-turns", "20", "--resume", resume_id]
+    ok, _sid, result = _one_turn(cmd, adapter.cwd(), env)
+    if ok and result.strip():
+        source.set_memory(result.strip())
+        source.clear_session()          # next event starts fresh, loads memory
+        config.log(f"[{source.slug}] compacted session {resume_id[:8]} → memory.md")
+        return True
+    config.log(f"[{source.slug}] compaction skipped (turn failed)")
+    return False
+
+
 def run_event(source: "config.Source", adapter, event_dict: dict,
               interactive: bool = False) -> tuple[bool, str]:
     resume_id = source.session_id()
@@ -91,10 +120,14 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
             + "\nHandle ONLY this event, then stop.\n\nEVENT:\n" + event_json
         )
     else:
+        mem = source.memory()
+        mem_note = (f"\n\n## Carried memory (from earlier sessions on this source)\n{mem}\n"
+                    if mem.strip() else "")
         body = (
             _base_brief()
             + "\n\n## This source\n"
             + adapter.prompt_section()
+            + mem_note
             + mode_note
             + "\n\nEVENT:\n"
             + event_json

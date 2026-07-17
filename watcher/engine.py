@@ -7,6 +7,7 @@ from . import config, runtime
 from .adapters import build_adapter
 
 MAX_ATTEMPTS = 5
+COMPACT_EVERY = 25        # events per source before rolling the session into memory
 
 
 def discover_into_queue(source: config.Source, adapter) -> int:
@@ -45,6 +46,13 @@ def drain_queue(source: config.Source, adapter, interactive: bool = False) -> No
         ok, _ = runtime.run_event(source, adapter, event, interactive=interactive)
         if ok:
             source.write_queue(q[1:])
+            # count handled events; compact the rolling session periodically
+            st = source.state()
+            st["events_since_compaction"] = st.get("events_since_compaction", 0) + 1
+            if st["events_since_compaction"] >= COMPACT_EVERY:
+                if runtime.compact(source, adapter):
+                    st["events_since_compaction"] = 0
+            source.save_state(st)
         elif event["attempts"] >= MAX_ATTEMPTS:
             config.log(f"[{source.slug}] GIVING UP {event.get('external_id')} "
                        f"after {event['attempts']} attempts")
