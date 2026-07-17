@@ -88,6 +88,40 @@ def _add_jetrix() -> dict | None:
             "email": me.get("email"), "_key": key}
 
 
+def _bare(args):
+    """`watcher` with no subcommand: set up if empty, else open the live view."""
+    srcs = config.load_config()["sources"]
+    if not srcs:
+        print("👋 No sources yet — let's set one up.\n")
+        cmd_add(args)
+        srcs = config.load_config()["sources"]
+        if srcs:
+            from . import scheduler
+            if input("\nRun watcher in the background from now on? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+                print(scheduler.start())
+            if input(f"Open the live view now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+                from . import attach
+                attach.attach(srcs[-1]["slug"])
+        return
+    # sources exist → live dashboard
+    if len(srcs) == 1:
+        from . import attach
+        return attach.attach(srcs[0]["slug"])
+    print("Your sources:")
+    for i, s in enumerate(srcs, 1):
+        src = config.Source(s["slug"])
+        ident = s.get("repo") or s.get("solution_name") or ""
+        print(f"  {i}. {s['slug']}  [{s['platform']}] {ident}  mode={src.mode()}")
+    pick = input("Open which? (number, or 'a' to add another): ").strip()
+    if pick.lower() == "a":
+        return cmd_add(args)
+    try:
+        from . import attach
+        attach.attach(srcs[int(pick) - 1]["slug"])
+    except (ValueError, IndexError):
+        print("nothing selected.")
+
+
 def cmd_add(_args):
     print("Add a source. Platform?\n  1. GitHub (run inside a project folder)\n  2. Jetrix")
     choice = input("Pick [1]: ").strip() or "1"
@@ -255,8 +289,8 @@ def main(argv=None):
     sub.add_parser("migrate-legacy", help="import the old ~/.clear-issue-watcher as a source")
 
     args = p.parse_args(argv)
-    if args.cmd is None:            # bare `watcher` → add flow
-        return cmd_add(args)
+    if args.cmd is None:            # bare `watcher` is the hero command
+        return _bare(args)
     {"add": cmd_add, "list": cmd_list, "remove": cmd_remove, "run-once": cmd_run_once,
      "mode": cmd_mode, "logs": cmd_logs, "doctor": cmd_doctor, "start": cmd_start,
      "stop": cmd_stop, "status": cmd_status, "attach": cmd_attach,

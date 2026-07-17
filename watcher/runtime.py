@@ -49,8 +49,64 @@ def _timed_input(prompt: str, timeout: int = 10) -> str | None:
     return None
 
 
+_C_DIM, _C_CYAN, _C_GREEN, _C_RESET = "\033[2m", "\033[36m", "\033[32m", "\033[0m"
+
+
+def _render_stream_event(obj) -> None:
+    """Pretty-print one stream-json event live (Claude-Code-like)."""
+    t = obj.get("type")
+    if t == "assistant":
+        for c in (obj.get("message") or {}).get("content", []):
+            if c.get("type") == "text" and c.get("text", "").strip():
+                print(f"{_C_GREEN}💬 {c['text'].strip()}{_C_RESET}")
+            elif c.get("type") == "tool_use":
+                arg = c.get("input", {}).get("command") or c.get("input", {}).get("file_path") \
+                    or c.get("input", {}).get("body") or ""
+                print(f"{_C_CYAN}🔧 {c.get('name','?')}{_C_RESET} {_C_DIM}{str(arg)[:150]}{_C_RESET}")
+    elif t == "user":
+        for c in (obj.get("message") or {}).get("content", []):
+            if c.get("type") == "tool_result":
+                body = c.get("content")
+                if isinstance(body, list):
+                    body = " ".join(x.get("text", "") for x in body if isinstance(x, dict))
+                s = str(body or "").strip().replace("\n", " ")[:160]
+                if s:
+                    print(f"{_C_DIM}   ↳ {s}{_C_RESET}")
+
+
+def _stream_turn(cmd, cwd, env):
+    """Run a turn with live streaming output. Returns (ok, session_id, result_text)."""
+    scmd = cmd + ["--output-format", "stream-json", "--verbose"]
+    sid, result = "", ""
+    try:
+        proc = subprocess.Popen(scmd, cwd=cwd, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:  # noqa: BLE001
+        return False, "", str(e)
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") == "system" and obj.get("subtype") == "init":
+            sid = obj.get("session_id", sid) or sid
+        elif obj.get("type") == "result":
+            sid = obj.get("session_id", sid) or sid
+            result = obj.get("result") or ""
+        else:
+            _render_stream_event(obj)
+    proc.wait()
+    if proc.returncode != 0:
+        return False, sid, (proc.stderr.read() or "")[-200:]
+    return True, sid, result
+
+
 def _one_turn(cmd, cwd, env):
-    """Run a single claude turn, return (ok, session_id, result_text)."""
+    """Run a single captured (non-streaming) claude turn → (ok, session_id, result)."""
+    cmd = cmd + ["--output-format", "json"]
     try:
         res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                              timeout=TIMEOUT_S, env=env)
@@ -141,15 +197,16 @@ def run_event(source: "config.Source", adapter, event_dict: dict,
     def _cmd(prompt, resume):
         c = [claude_bin(), "-p", prompt,
              "--allowedTools", ",".join(adapter.allowed_tools()),
-             "--output-format", "json", "--max-turns", MAX_TURNS]
+             "--max-turns", MAX_TURNS]
         if resume:
             c += ["--resume", resume]
         return c
 
+    turn = _stream_turn if interactive else _one_turn
     sid = resume_id
     prompt = body
     for _hop in range(4):        # allow a few approval round-trips per event
-        ok, new_sid, result = _one_turn(_cmd(prompt, sid), adapter.cwd(), env)
+        ok, new_sid, result = turn(_cmd(prompt, sid), adapter.cwd(), env)
         if not ok:
             if result == "__timeout__":
                 config.log(f"[{source.slug}] handle TIMEOUT")
