@@ -117,9 +117,13 @@ def discover(state):
         if c["user"]["login"] == ME and SIGNATURE in (c["body"] or ""):
             continue
         issue_number = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
+        body = c["body"] or ""
+        # a comment addressed to @watcher / @claude is a direct instruction
+        directive = any(tok in body.lower() for tok in ("@watcher", "@claude"))
         found.append({"key": key, "ts": c["created_at"], "type": "new_comment",
                       "issue_number": issue_number, "comment_author": c["user"]["login"],
-                      "comment_body": (c["body"] or "")[:2000], "url": c["html_url"]})
+                      "comment_body": body[:2000], "url": c["html_url"],
+                      "directive_to_watcher": directive})
 
     # 3) other issue activity (assign, label, close, reopen, rename) until closed.
     #    The events API has no `since` filter, so we page recent + filter client-side.
