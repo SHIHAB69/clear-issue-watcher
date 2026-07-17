@@ -184,6 +184,16 @@ def run_one(event):
         log(f"handle TIMEOUT: #{event['issue_number']} — will retry next cycle")
         return False   # keep at head of queue
 
+    blob = (res.stdout or "") + " " + (res.stderr or "")
+    auth_expired = any(s in blob.lower() for s in
+                       ("invalid api key", "authentication", "unauthorized",
+                        "401", "please run /login", "oauth token", "expired"))
+    if res.returncode != 0:
+        hint = " — CLAUDE AUTH looks expired; run `claude` to re-login" if auth_expired else ""
+        log(f"handle FAILED: #{event['issue_number']} rc={res.returncode}{hint} "
+            f":: {blob.strip()[-200:]}")
+        return False   # do NOT pop — retry after re-auth (capped in main)
+
     sid, tail = resume_id, ""
     try:
         out = json.loads(res.stdout)
@@ -211,17 +221,26 @@ def main():
         state = load_state()
         discover(state)
         # drain the queue serially, oldest first, one session, one at a time
+        MAX_ATTEMPTS = 5     # e.g. survives a re-auth gap; then give up so the
+                             # queue can't be blocked forever by one bad event
         while True:
             q = read_queue()
             if not q:
                 break
             event = q[0]
+            event["attempts"] = event.get("attempts", 0) + 1
             LOCK.write_text(str(os.getpid()))   # refresh lock during long runs
             ok = run_one(event)
             if ok:
                 write_queue(q[1:])              # pop only on success
+            elif event["attempts"] >= MAX_ATTEMPTS:
+                log(f"GIVING UP on #{event['issue_number']} after "
+                    f"{event['attempts']} attempts — dropping from queue")
+                write_queue(q[1:])
             else:
-                break                            # timeout: leave for next cycle
+                q[0] = event                     # persist the attempt counter
+                write_queue(q)
+                break                            # retry this event next cycle
     except Exception as e:  # noqa: BLE001
         log(f"ERROR: {e}")
     finally:
