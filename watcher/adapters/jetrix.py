@@ -74,6 +74,7 @@ class JetrixAdapter(Adapter):
         # newest-first feed; page back via nextBefore until we pass `since`.
         events: list[Event] = []
         before = ""
+        reached_boundary = False
         while True:
             path = f"/dev/solutions/{self.solution_id}/activity?since={since}&limit=200"
             if before:
@@ -83,6 +84,9 @@ class JetrixAdapter(Adapter):
             for it in items:
                 created = it.get("createdAt", "")
                 if created <= since:
+                    # items are newest-first: once we hit `since`, everything
+                    # older (this page's tail + all further pages) is old news.
+                    reached_boundary = True
                     continue
                 kind = "new_task" if it.get("type") == "created" else \
                        ("new_comment" if it.get("kind") == "comment" else "activity")
@@ -103,7 +107,7 @@ class JetrixAdapter(Adapter):
                           "mentions_me": self.email in mentions,
                           "_self": it.get("authorEmail") == self.email and SIGNATURE in body}))
             nxt = resp.get("nextBefore")
-            if not nxt or not items:
+            if reached_boundary or not nxt or not items:
                 break
             before = nxt
         return events

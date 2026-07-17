@@ -13,13 +13,15 @@ COMPACT_EVERY = 25        # events per source before rolling the session into me
 def discover_into_queue(source: config.Source, adapter) -> int:
     state = source.state()
     since = state["last_checked"]
-    processed = set(state["processed"])
+    processed = list(state["processed"])   # keep insertion order (trim is meaningful)
+    seen = set(processed)
     found = []
     for ev in adapter.discover_events(since):
         key = f"{ev.kind}:{ev.external_id}"
-        if key in processed:
+        if key in seen:
             continue
-        processed.add(key)
+        seen.add(key)
+        processed.append(key)
         if adapter.is_self_event(ev):      # anti-loop
             continue
         found.append(ev)
@@ -29,7 +31,7 @@ def discover_into_queue(source: config.Source, adapter) -> int:
     if found:
         config.log(f"[{source.slug}] queued {len(found)}: "
                    + ", ".join(f"{e.kind}#{e.external_id}" for e in found))
-    state["processed"] = list(processed)
+    state["processed"] = processed
     state["last_checked"] = config.now_iso()
     source.save_state(state)
     return len(found)

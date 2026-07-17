@@ -79,8 +79,10 @@ def _stream_turn(cmd, cwd, env):
     scmd = cmd + ["--output-format", "stream-json", "--verbose"]
     sid, result = "", ""
     try:
+        # stderr→stdout so a full stderr pipe can't deadlock while we read stdout;
+        # non-JSON (stderr) lines are simply skipped by the parser below.
         proc = subprocess.Popen(scmd, cwd=cwd, env=env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except Exception as e:  # noqa: BLE001
         return False, "", str(e)
     for line in proc.stdout:
@@ -100,7 +102,7 @@ def _stream_turn(cmd, cwd, env):
             _render_stream_event(obj)
     proc.wait()
     if proc.returncode != 0:
-        return False, sid, (proc.stderr.read() or "")[-200:]
+        return False, sid, f"stream turn exited rc={proc.returncode}"
     return True, sid, result
 
 
