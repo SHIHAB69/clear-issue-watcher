@@ -29,10 +29,11 @@ def attach(slug: str):
             engine.run_source(slug, interactive=True)   # streams live; handles approvals
             if before == 0 and len(src.queue()) == 0:
                 for remaining in range(POLL_S, 0, -1):
-                    print(f"\r{C_DIM}idle — next check in {remaining:>2}s "
-                          f"(Ctrl-C to detach){C_RESET}", end="", flush=True)
+                    print(f"\r{C_DIM}idle — watching {ident} — next check in "
+                          f"{remaining:>2}s (Ctrl-C to detach){C_RESET}",
+                          end="", flush=True)
                     time.sleep(1)
-                print("\r" + " " * 50 + "\r", end="")
+                print("\r" + " " * 72 + "\r", end="")
     except KeyboardInterrupt:
         print(f"\n{C_YEL}detached. Background runner keeps going if started "
               f"(watcher status).{C_RESET}")
