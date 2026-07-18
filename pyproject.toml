@@ -3,7 +3,10 @@ name = "watcher"
 version = "0.2.0"
 description = "A persistent Claude Code runtime that watches task sources (GitHub, Jetrix) and handles issues like a senior engineer."
 requires-python = ">=3.10"
-dependencies = []          # stdlib only (urllib, subprocess) — no third-party deps
+dependencies = [
+    "textual>=8.0",        # the TUI framework (Rich authors; Python's Ink) — proper
+                           # widgets: docked multi-line input, scrolling log, modal dialogs
+]
 
 [project.scripts]
 watcher = "watcher.cli:main"
